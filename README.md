@@ -16,6 +16,10 @@ AI 기반 분석: gemini-3-flash-preview 모델을 사용하여 로그의 원인
 
 보안 : rm -rf, mkfs 등 위험요소가 있 명령어를 사전에 필터링하는 안전 로직이 포함되어 있습니다.
 
+
+🛠️ 수정된 README.md 코드
+Markdown
+
 ### 시스템 아키텍처
 현재 시스템은 다음과 같은 흐름으로 동작합니다:
 
@@ -29,7 +33,7 @@ AI 기반 분석: gemini-3-flash-preview 모델을 사용하여 로그의 원인
 ### 시작하기
 
 #### 1. 환경 준비
-Python 가상환경 구축 및 필수 패키지 설치
+*Python 가상환경 구축 및 필수 패키지 설치**
 
 # 가상환경 생성 및 활성화
 python3 -m venv venv
@@ -41,8 +45,8 @@ pip install flask google-generativeai requests
 2. 서비스 실행
 main.py 파일에 API Key와 Webhook URL을 설정한 후 서비스를 실행합니다.
 
-sudo systemctl enable --now ai-remediator.service
 
+sudo systemctl enable --now ai-remediator.service
 주요 파일 설명
 main.py: 에이전트의 핵심 로직 (로그 감시, Flask 서버, AI 통신)
 
@@ -51,8 +55,12 @@ prompt.txt: AI에게 부여된 SRE 전문가 지침(프롬프트) 저장소
 ai-remediator.service: 백그라운드 상시 실행을 위한 Systemd 설정 파일
 
 프로젝트 구조
+
+```
 .
 ├── main.py              # 메인 실행 파일
 ├── prompt.txt           # 프롬프트 영구 저장 파일
 ├── requirements.txt     # 의존성 패키지 목록
 └── README.md            # 설명서
+
+```
