@@ -14,22 +14,22 @@ AI 기반 분석: gemini-3-flash-preview 모델을 사용하여 로그의 원인
 
 프롬프트 수정, 반영: /prompt_change 명령어로 AI의 페르소나를 실시간 변경하고, 이를 prompt.txt에 기록하여 재시작 후에도 유지합니다.
 
-보안 : rm -rf, mkfs 등 파괴적인 명령어를 사전에 필터링하는 안전 로직이 포함되어 있습니다.
+보안 : rm -rf, mkfs 등 위험요소가 있 명령어를 사전에 필터링하는 안전 로직이 포함되어 있습니다.
 
 ### 시스템 아키텍처
 현재 시스템은 다음과 같은 흐름으로 동작합니다:
 
-1. **Detection**: Log Monitor가 에러 키워드를 포착합니다.
-2. **Analysis**: AI Agent가 Gemini API에 분석을 요청합니다.
-3. **Notification**: 분석 결과와 조치 버튼이 Slack으로 전송됩니다.
-4. **Action**: 관리자가 승인하면 OS Shell에서 명령어가 실행됩니다.
+1. Detection: Log Monitor가 에러 키워드를 포착합니다.
+2. Analysis: AI Agent가 Gemini API에 분석을 요청합니다.
+3. Notification: 분석 결과와 조치 버튼이 Slack으로 전송됩니다.
+4. Action: 관리자가 승인하면 OS Shell에서 명령어가 실행됩니다.
 
 ---
 
 ### 시작하기
 
 #### 1. 환경 준비
-**Python 가상환경 구축 및 필수 패키지 설치**
+Python 가상환경 구축 및 필수 패키지 설치
 
 # 가상환경 생성 및 활성화
 python3 -m venv venv
@@ -40,8 +40,6 @@ pip install flask google-generativeai requests
 
 2. 서비스 실행
 main.py 파일에 API Key와 Webhook URL을 설정한 후 서비스를 실행합니다.
-
-Bash
 
 sudo systemctl enable --now ai-remediator.service
 
@@ -58,5 +56,3 @@ ai-remediator.service: 백그라운드 상시 실행을 위한 Systemd 설정 �
 ├── prompt.txt           # 프롬프트 영구 저장 파일
 ├── requirements.txt     # 의존성 패키지 목록
 └── README.md            # 설명서
-
----
