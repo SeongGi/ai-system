@@ -1,57 +1,180 @@
 #!/bin/bash
-# AI SRE Agent
+# AI SRE Agent - Production Version (Log File vs Journald Selectable)
 
-read -p "Gemini Key: " G_K
-read -p "Slack Webhook: " S_W
-L_P=${1:-/var/log/syslog}
-U="ai-agent"; D="/opt/ai-agent"; V="$D/venv"; F="$D/prompt.txt"
+# 1. 설정 입력
+echo "=== AI SRE Agent Configuration ==="
+read -p "Gemini API Key: " GEMINI_API_KEY
+read -p "Slack Webhook URL: " SLACK_WEBHOOK_URL
+read -p "Gemini Model (e.g., gemini-1.5-flash): " GEMINI_MODEL
+read -p "Service Port (Default: 5000): " SERVICE_PORT
+SERVICE_PORT=${SERVICE_PORT:-5000}
 
-sudo -u $U $V/bin/python3 - << 'EOF' | sudo -u $U tee $D/main.py > /dev/null
-import os, subprocess, requests, json, time
-from threading import Thread
-from flask import Flask, request, jsonify
-import google.generativeai as genai
+echo "------------------------------------------------"
+echo "Select Monitoring Mode:"
+echo "1) Journald (System-wide error monitoring - Recommended)"
+echo "2) Log File (Specific file path monitoring)"
+read -p "Selection (1 or 2): " MONITOR_MODE
 
-G_K, S_W, L_P, F = os.getenv("GEMINI_API_KEY"), os.getenv("SLACK_WEBHOOK_URL"), os.getenv("LOG_PATH"), "/opt/ai-agent/prompt.txt"
-genai.configure(api_key=G_K)
-model = genai.GenerativeModel('gemini-3-pro-preview')
-app = Flask(__name__)
+if [ "$MONITOR_MODE" == "2" ]; then
+    read -p "Log File Path (e.g., /var/log/syslog): " LOG_PATH
+    LOG_PATH=${LOG_PATH:-/var/log/syslog}
+    MONITOR_TYPE="FILE"
+else
+    MONITOR_TYPE="JOURNAL"
+    LOG_PATH="N/A (Journald)"
+fi
 
-def load(): return open(F, "r").read().strip() if os.path.exists(F) else "Senior SRE. One safe command only."
-def save(p): open(F, "w").write(p)
-S_P = load()
+AGENT_USER="ai-agent"
+AGENT_DIR="/opt/ai-agent"
 
-@app.route('/prompt/slack', methods=['POST'])
-def prompt():
-    global S_P
-    t = request.form.get('text', '').strip()
-    if t: S_P = t; save(t)
-    return jsonify({"text": f"Saved Prompt: `{S_P}`"})
+# 2. 기존 환경 초기화 (Clean Up)
+echo "--- [1/5] Cleanup Existing Environment ---"
+sudo systemctl stop ai-remediator.service 2>/dev/null
+sudo systemctl disable ai-remediator.service 2>/dev/null
+sudo rm -f /etc/systemd/system/ai-remediator.service
+sudo fuser -k ${SERVICE_PORT}/tcp 2>/dev/null
+sudo rm -rf $AGENT_DIR
+sudo userdel -r $AGENT_USER 2>/dev/null
 
-@app.route('/slack/interactive', methods=['POST'])
-def interactive():
-    p = json.loads(request.form.get('payload'))
-    c = p['actions'][0]['value']
-    if c == "rejected" or not any(d in c.lower() for d in ["rm ", "dd ", "mkfs"]):
-        r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30)
-        return jsonify({"replace_original": True, "text": f"✅ `{c}`\n```{r.stdout}```"})
-    return jsonify({"text": "🚫 Cancelled"})
+# 3. 유저 및 권한 설정
+echo "--- [2/5] User and Permission Setup ---"
+sudo useradd -m -s /bin/bash $AGENT_USER
+sudo usermod -aG adm,systemd-journal $AGENT_USER
+sudo mkdir -p $AGENT_DIR
+sudo chown -R $AGENT_USER:$AGENT_USER $AGENT_DIR
 
-def watch():
-    p = subprocess.Popen(["tail", "-F", "-n", "0", L_P], stdout=subprocess.PIPE, text=True)
-    for l in iter(p.stdout.readline, ""):
-        if not any(k in l.lower() for k in ["ai-agent", "flask", "python"]) and any(k in l.upper() for k in ["ERROR", "CRITICAL"]):
-            try:
-                res = model.generate_content(f"{S_P}\nLog: {l}")
-                cmd = res.text.strip().replace('`', '').split('\n')[0]
-                requests.post(S_W, json={"attachments": [{"callback_id": "sre", "color": "#f00", "fields": [{"title": "Log", "value": f"```{l}```"}, {"title": "AI", "value": f"`{cmd}`"}],
-                "actions": [{"name": "a", "text": "Run", "type": "button", "value": cmd, "style": "primary"}, {"name": "a", "text": "No", "type": "button", "value": "rejected"}]}]})
-            except: pass
-
-Thread(target=watch, daemon=True).start()
-app.run(host="0.0.0.0", port=5000)
+# 4. 필수 파일 및 가상환경 생성
+echo "--- [3/5] Directory and VirtualEnv Setup ---"
+sudo -u $AGENT_USER tee $AGENT_DIR/prompt.txt << 'EOF' > /dev/null
+Senior SRE. Provide only one safe bash command to fix the log. No prose.
 EOF
 
+sudo apt update && sudo apt install -y python3-venv coreutils psmisc
+sudo -u $AGENT_USER python3 -m venv $AGENT_DIR/venv
+sudo -u $AGENT_USER $AGENT_DIR/venv/bin/pip install flask requests google-genai
+
+# 5. 메인 코드(main.py) 생성
+echo "--- [4/5] Creating main.py ---"
+cat << 'EOF' | sudo -u $AGENT_USER tee $AGENT_DIR/main.py > /dev/null
+import os, subprocess, requests, json, time, sys
+from threading import Thread
+from flask import Flask, request, jsonify
+from google import genai
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
+MODEL_NAME = os.getenv("GEMINI_MODEL")
+PORT = int(os.getenv("SERVICE_PORT", 5000))
+MONITOR_TYPE = os.getenv("MONITOR_TYPE")
+LOG_PATH = os.getenv("LOG_PATH")
+PROMPT_FILE = "/opt/ai-agent/prompt.txt"
+
+client = genai.Client(api_key=API_KEY)
+app = Flask(__name__)
+
+def load_prompt():
+    try:
+        with open(PROMPT_FILE, "r") as f: return f.read().strip()
+    except: return "Senior SRE. Provide only one safe bash command to fix the log."
+
+@app.route('/prompt/slack', methods=['POST'])
+def handle_slash_command():
+    user_text = request.form.get('text', '').strip()
+    if not user_text:
+        return jsonify({"response_type": "ephemeral", "text": f"Current Prompt: `{load_prompt()}`"})
+    with open(PROMPT_FILE, "w") as f: f.write(user_text)
+    return jsonify({"response_type": "in_channel", "text": f"Prompt updated: `{user_text}`"})
+
+@app.route('/slack/interactive', methods=['POST'])
+def handle_interactive():
+    payload = json.loads(request.form.get('payload'))
+    cmd = payload['actions'][0]['value']
+    if cmd == "ignore": return jsonify({"replace_original": True, "text": "Action Ignored"})
+    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+    return jsonify({"replace_original": True, "text": f"Execution Complete\nCommand: `{cmd}`\n```{res.stdout if res.stdout else res.stderr}```"})
+
+def monitor():
+    if MONITOR_TYPE == "JOURNAL":
+        proc = subprocess.Popen(['journalctl', '-f', '-n', '0', '-p', 'err..emerg'], stdout=subprocess.PIPE, text=True)
+    else:
+        proc = subprocess.Popen(['tail', '-F', '-n', '0', LOG_PATH], stdout=subprocess.PIPE, text=True)
+
+    print(f"Monitoring Started ({MONITOR_TYPE})")
+    while True:
+        line = proc.stdout.readline()
+        if not line: break
+        line = line.strip()
+        if MONITOR_TYPE == "FILE" and not any(k in line.upper() for k in ["ERROR", "CRITICAL", "FATAL"]): continue
+        
+        try:
+            resp = client.models.generate_content(model=MODEL_NAME, contents=f"{load_prompt()}\nLog: {line}")
+            ai_cmd = resp.text.strip().replace('`', '').split('\n')[0]
+            requests.post(SLACK_WEBHOOK, json={
+                "text": "System Issue Detected - AI Remediation Suggestion",
+                "attachments": [{
+                    "callback_id": "fix", "color": "#F44336",
+                    "fields": [{"title": "Log", "value": f"```{line}```"}, {"title": "AI Suggestion", "value": f"`{ai_cmd}`"}],
+                    "actions": [
+                        {"name": "e", "text": "Execute", "type": "button", "value": ai_cmd, "style": "primary"},
+                        {"name": "d", "text": "Ignore", "type": "button", "value": "ignore", "style": "danger"}
+                    ]
+                }]
+            })
+        except Exception as e: print(f"Monitor Error: {e}")
+
+if __name__ == "__main__":
+    Thread(target=monitor, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT, debug=False)
+EOF
+
+# 6. 서비스 등록 및 시작
+echo "--- [5/5] Systemd Service Registration ---"
+sudo tee /etc/systemd/system/ai-remediator.service > /dev/null <<EOT
+[Unit]
+Description=AI SRE Agent Final
+After=network.target
+
+[Service]
+ExecStart=$AGENT_DIR/venv/bin/python3 $AGENT_DIR/main.py
+Restart=always
+User=$AGENT_USER
+Group=adm
+Environment=GEMINI_API_KEY=$GEMINI_API_KEY
+Environment=SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL
+Environment=GEMINI_MODEL=$GEMINI_MODEL
+Environment=SERVICE_PORT=$SERVICE_PORT
+Environment=MONITOR_TYPE=$MONITOR_TYPE
+Environment=LOG_PATH=$LOG_PATH
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOT
+
+sudo systemctl daemon-reload
+sudo systemctl enable ai-remediator.service
 sudo systemctl restart ai-remediator.service
-echo "설치 완료"
-echo "로그 확인: journalctl -u ai-remediator.service -f"
+
+# 7. 최종 설치 정보 출력
+PUBLIC_IP=$(curl -s ifconfig.me)
+echo ""
+echo "===================================================="
+echo "Installation Complete"
+echo "===================================================="
+echo "Agent Information:"
+echo " - Path: $AGENT_DIR"
+echo " - Model: $GEMINI_MODEL"
+echo " - Port: $SERVICE_PORT"
+echo " - Mode: $MONITOR_TYPE ($LOG_PATH)"
+echo ""
+echo "Slack API Configuration URLs:"
+echo " 1. Slash Command (/prompt_change):"
+echo "    http://$PUBLIC_IP:$SERVICE_PORT/prompt/slack"
+echo " 2. Interactivity & Shortcuts:"
+echo "    http://$PUBLIC_IP:$SERVICE_PORT/slack/interactive"
+echo ""
+echo "Management Commands:"
+echo " - View Logs: sudo journalctl -u ai-remediator.service -f"
+echo " - Restart: sudo systemctl restart ai-remediator.service"
+echo " - Edit Prompt: sudo nano $AGENT_DIR/prompt.txt"
+echo "===================================================="
