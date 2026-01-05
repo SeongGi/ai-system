@@ -1,100 +1,57 @@
 #!/bin/bash
+# AI SRE Agent
 
-read -p "Gemini API Key: " GEMINI_API_KEY
-read -p "Slack Webhook: " SLACK_WEBHOOK_URL
-LOG_PATH=${1:-/var/log/syslog}
+read -p "Gemini Key: " G_K
+read -p "Slack Webhook: " S_W
+L_P=${1:-/var/log/syslog}
+U="ai-agent"; D="/opt/ai-agent"; V="$D/venv"; F="$D/prompt.txt"
 
-USER="ai-agent"
-DIR="/opt/ai-agent"
-VENV="$DIR/venv"
-
-sudo useradd --system --shell /usr/sbin/nologin $USER || true
-sudo usermod -aG adm $USER
-sudo mkdir -p $DIR
-sudo chown $USER:$USER $DIR
-echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER
-
-sudo -u $USER python3 -m venv $VENV
-sudo -u $USER $VENV/bin/pip install --upgrade pip
-sudo -u $USER $VENV/bin/pip install flask google-generativeai requests
-
-cat << 'EOF' | sudo -u $USER tee $DIR/main.py > /dev/null
-import os, time, subprocess, requests, json
+sudo -u $U $V/bin/python3 - << 'EOF' | sudo -u $U tee $D/main.py > /dev/null
+import os, subprocess, requests, json, time
 from threading import Thread
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-LOG_PATH = os.getenv("LOG_PATH", "/var/log/syslog")
-
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+G_K, S_W, L_P, F = os.getenv("GEMINI_API_KEY"), os.getenv("SLACK_WEBHOOK_URL"), os.getenv("LOG_PATH"), "/opt/ai-agent/prompt.txt"
+genai.configure(api_key=G_K)
+model = genai.GenerativeModel('gemini-3-pro-preview')
 app = Flask(__name__)
 
-AUTO_KEY = ["disk space", "disk full", "out of space", "usage exceeded"]
-DANGER = ["rm -rf /", "mkfs", "dd ", "shutdown", "reboot"]
+def load(): return open(F, "r").read().strip() if os.path.exists(F) else "Senior SRE. One safe command only."
+def save(p): open(F, "w").write(p)
+S_P = load()
 
-def is_safe(cmd):
-    return not any(d in cmd.lower() for d in DANGER)
-
-def execute(cmd):
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-        return ("성공" if r.returncode == 0 else "실패"), (r.stdout if r.stdout else "No Output")
-    except Exception as e: return "에러", str(e)
-
-def send_slack(error, cmd, status, out, auto=False):
-    p = {"text": f"{'[Auto]' if auto else '✅ [Approved]'}\n*Cmd:* `{cmd}`",
-         "attachments": [{"color": "#36a64f" if status=="성공" else "#ff0000",
-                          "fields": [{"title": "Log", "value": f"```{error}```"},
-                                     {"title": "Result", "value": f"`{status}`: {out}"}]}]}
-    requests.post(SLACK_WEBHOOK_URL, json=p)
-
-def watch():
-    proc = subprocess.Popen(["tail", "-F", "-n", "0", LOG_PATH], stdout=subprocess.PIPE, text=True)
-    for line in iter(proc.stdout.readline, ""):
-        if not line.strip() or "python" in line: continue
-        if "error" in line.lower() or "critical" in line.lower():
-            res = model.generate_content(f"Solve with one linux command: {line}")
-            if res and res.text:
-                cmd = res.text.strip().replace('`', '')
-                if any(k in line.lower() for k in AUTO_KEY) and is_safe(cmd):
-                    s, o = execute(cmd)
-                    send_slack(line, cmd, s, o, True)
-                else:
-                    payload = {"text": " *Approval Required*", "attachments": [{"callback_id": "rem", "color": "#ff9800",
-                        "fields": [{"title": "Log", "value": f"```{line}```"}, {"title": "AI", "value": f"`{cmd}`"}],
-                        "actions": [{"name": "ok", "text": "Approve", "type": "button", "value": cmd, "style": "primary"}]}]}
-                    requests.post(SLACK_WEBHOOK_URL, json=payload)
+@app.route('/prompt/slack', methods=['POST'])
+def prompt():
+    global S_P
+    t = request.form.get('text', '').strip()
+    if t: S_P = t; save(t)
+    return jsonify({"text": f"Saved Prompt: `{S_P}`"})
 
 @app.route('/slack/interactive', methods=['POST'])
 def interactive():
-    payload = json.loads(request.form.get('payload'))
-    cmd = payload['actions'][0]['value']
-    s, o = execute(cmd)
-    return jsonify({"replace_original": True, "text": f"✅ Done\n*Cmd:* `{cmd}`\n*Res:* `{s}`\n```{o}```"})
+    p = json.loads(request.form.get('payload'))
+    c = p['actions'][0]['value']
+    if c == "rejected" or not any(d in c.lower() for d in ["rm ", "dd ", "mkfs"]):
+        r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30)
+        return jsonify({"replace_original": True, "text": f"✅ `{c}`\n```{r.stdout}```"})
+    return jsonify({"text": "🚫 Cancelled"})
 
-if __name__ == "__main__":
-    Thread(target=watch, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000)
+def watch():
+    p = subprocess.Popen(["tail", "-F", "-n", "0", L_P], stdout=subprocess.PIPE, text=True)
+    for l in iter(p.stdout.readline, ""):
+        if not any(k in l.lower() for k in ["ai-agent", "flask", "python"]) and any(k in l.upper() for k in ["ERROR", "CRITICAL"]):
+            try:
+                res = model.generate_content(f"{S_P}\nLog: {l}")
+                cmd = res.text.strip().replace('`', '').split('\n')[0]
+                requests.post(S_W, json={"attachments": [{"callback_id": "sre", "color": "#f00", "fields": [{"title": "Log", "value": f"```{l}```"}, {"title": "AI", "value": f"`{cmd}`"}],
+                "actions": [{"name": "a", "text": "Run", "type": "button", "value": cmd, "style": "primary"}, {"name": "a", "text": "No", "type": "button", "value": "rejected"}]}]})
+            except: pass
+
+Thread(target=watch, daemon=True).start()
+app.run(host="0.0.0.0", port=5000)
 EOF
 
-sudo bash -c "cat <<EOF > /etc/systemd/system/ai-remediator.service
-[Unit]
-Description=AI Auto-Healing Agent
-After=network.target
-[Service]
-ExecStart=$VENV/bin/python3 $DIR/main.py
-Restart=always
-User=$USER
-Environment=GEMINI_API_KEY=$GEMINI_API_KEY
-Environment=SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL
-Environment=LOG_PATH=$LOG_PATH
-Environment=PYTHONUNBUFFERED=1
-[Install]
-WantedBy=multi-user.target
-EOF"
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now ai-remediator.service
+sudo systemctl restart ai-remediator.service
+echo "설치 완료"
+echo "로그 확인: journalctl -u ai-remediator.service -f"
