@@ -155,26 +155,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable ai-remediator.service
 sudo systemctl restart ai-remediator.service
 
-# 7. 최종 설치 정보 출력
+# 최종 정보 출력
 PUBLIC_IP=$(curl -s ifconfig.me)
 echo ""
 echo "===================================================="
-echo "Installation Complete"
+echo "🎉 AI SRE 에이전트 설치가 완료되었습니다!"
 echo "===================================================="
-echo "Agent Information:"
-echo " - Path: $AGENT_DIR"
-echo " - Model: $GEMINI_MODEL"
-echo " - Port: $SERVICE_PORT"
-echo " - Mode: $MONITOR_TYPE ($LOG_PATH)"
+echo "📍 [에이전트 정보]"
+echo " - 설치 위치: $AGENT_DIR"
+echo " - 자동 조치 키워드: $AGENT_DIR/auto_keywords.txt"
+echo " - 명령어 블랙리스트: $AGENT_DIR/blacklist.txt"
 echo ""
-echo "Slack API Configuration URLs:"
-echo " 1. Slash Command (/prompt_change):"
-echo "    http://$PUBLIC_IP:$SERVICE_PORT/prompt/slack"
-echo " 2. Interactivity & Shortcuts:"
-echo "    http://$PUBLIC_IP:$SERVICE_PORT/slack/interactive"
-echo ""
-echo "Management Commands:"
-echo " - View Logs: sudo journalctl -u ai-remediator.service -f"
-echo " - Restart: sudo systemctl restart ai-remediator.service"
-echo " - Edit Prompt: sudo nano $AGENT_DIR/prompt.txt"
+echo "🔍 [보안 가이드]"
+echo " - AI가 실행하면 안 되는 단어를 blacklist.txt에 추가하세요."
+echo " - 현재 rm, mkfs, shutdown, reboot 등이 차단되어 있습니다."
 echo "===================================================="

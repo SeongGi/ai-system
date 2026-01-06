@@ -1,5 +1,5 @@
 #!/bin/bash
-# AI SRE Agent - Ultimate Final Version (Log File vs Journald Selectable)
+# AI SRE Agent - Security Enhanced Version (Blacklist File Supported)
 
 # 1. 사용자 입력 받기
 echo "=== AI SRE 에이전트 설정 시작 ==="
@@ -42,8 +42,25 @@ sudo mkdir -p $AGENT_DIR
 sudo chown -R $AGENT_USER:$AGENT_USER $AGENT_DIR
 
 echo "--- [3/5] 필수 파일 및 가상환경 생성 ---"
+# AI 지침 파일
 sudo -u $AGENT_USER tee $AGENT_DIR/prompt.txt << 'EOF' > /dev/null
 Senior SRE. Provide only one safe bash command to fix the log. No prose.
+EOF
+
+# 자동 실행 키워드 파일
+sudo -u $AGENT_USER tee $AGENT_DIR/auto_keywords.txt << 'EOF' > /dev/null
+DISK FULL
+OUT OF MEMORY
+EOF
+
+# [추가] 위험 명령어 블랙리스트 파일
+sudo -u $AGENT_USER tee $AGENT_DIR/blacklist.txt << 'EOF' > /dev/null
+rm
+mkfs
+shutdown
+reboot
+dd
+>
 EOF
 
 sudo apt update && sudo apt install -y python3-venv coreutils psmisc
@@ -64,20 +81,42 @@ PORT = int(os.getenv("SERVICE_PORT", 5000))
 MONITOR_TYPE = os.getenv("MONITOR_TYPE")
 LOG_PATH = os.getenv("LOG_PATH")
 PROMPT_FILE = "/opt/ai-agent/prompt.txt"
+AUTO_KEY_FILE = "/opt/ai-agent/auto_keywords.txt"
+BLACKLIST_FILE = "/opt/ai-agent/blacklist.txt"
 
 client = genai.Client(api_key=API_KEY)
 app = Flask(__name__)
 
-def load_prompt():
+def load_file_to_list(filepath):
     try:
-        with open(PROMPT_FILE, "r") as f: return f.read().strip()
-    except: return "Senior SRE. Provide only one safe bash command to fix the log."
+        with open(filepath, "r") as f:
+            return [line.strip().upper() for line in f if line.strip()]
+    except: return []
+
+def is_safe(command):
+    """명령어에 블랙리스트 단어가 포함되어 있는지 검사"""
+    blacklist = load_file_to_list(BLACKLIST_FILE)
+    cmd_upper = command.upper()
+    for word in blacklist:
+        if word in cmd_upper:
+            return False, word
+    return True, None
+
+def execute_command(cmd):
+    safe, forbidden_word = is_safe(cmd)
+    if not safe:
+        return f"🚫 보안 위험 감지: '{forbidden_word}' 단어가 포함되어 실행이 차단되었습니다."
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+        return res.stdout if res.stdout else res.stderr
+    except Exception as e:
+        return str(e)
 
 @app.route('/prompt/slack', methods=['POST'])
 def handle_slash_command():
     user_text = request.form.get('text', '').strip()
     if not user_text:
-        return jsonify({"response_type": "ephemeral", "text": f"현재 프롬프트: `{load_prompt()}`"})
+        return jsonify({"response_type": "ephemeral", "text": f"현재 프롬프트: `{load_file_to_list(PROMPT_FILE)}`"})
     with open(PROMPT_FILE, "w") as f: f.write(user_text)
     return jsonify({"response_type": "in_channel", "text": f"✅ 프롬프트 변경됨: `{user_text}`"})
 
@@ -86,8 +125,12 @@ def handle_interactive():
     payload = json.loads(request.form.get('payload'))
     cmd = payload['actions'][0]['value']
     if cmd == "ignore": return jsonify({"replace_original": True, "text": "🚫 조치 거절됨"})
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-    return jsonify({"replace_original": True, "text": f"✅ *실행 완료*\n명령어: `{cmd}`\n```{res.stdout if res.stdout else res.stderr}```"})
+    
+    result = execute_command(cmd)
+    return jsonify({
+        "replace_original": True, 
+        "text": f"✅ *처리 결과*\n명령어: `{cmd}`\n```{result[:500]}```"
+    })
 
 def monitor():
     if MONITOR_TYPE == "JOURNAL":
@@ -102,20 +145,40 @@ def monitor():
         line = line.strip()
         if MONITOR_TYPE == "FILE" and not any(k in line.upper() for k in ["ERROR", "CRITICAL", "FATAL"]): continue
         
+        auto_keys = load_file_to_list(AUTO_KEY_FILE)
+        is_auto = any(k in line.upper() for k in auto_keys)
+        
         try:
-            resp = client.models.generate_content(model=MODEL_NAME, contents=f"{load_prompt()}\nLog: {line}")
+            resp = client.models.generate_content(model=MODEL_NAME, contents=f"{with_open(PROMPT_FILE, 'r').read() if os.path.exists(PROMPT_FILE) else 'Senior SRE'}\nLog: {line}")
             ai_cmd = resp.text.strip().replace('`', '').split('\n')[0]
-            requests.post(SLACK_WEBHOOK, json={
-                "text": "🚨 *장애 탐지 및 AI 조치 제안*",
-                "attachments": [{
-                    "callback_id": "fix", "color": "#F44336",
-                    "fields": [{"title": "로그", "value": f"```{line}```"}, {"title": "AI 제안", "value": f"`{ai_cmd}`"}],
-                    "actions": [
-                        {"name": "e", "text": "✅ 실행", "type": "button", "value": ai_cmd, "style": "primary"},
-                        {"name": "d", "text": "❌ 거절", "type": "button", "value": "ignore", "style": "danger"}
-                    ]
-                }]
-            })
+            
+            # 보안 검사
+            safe, word = is_safe(ai_cmd)
+
+            if is_auto and safe:
+                result = execute_command(ai_cmd)
+                requests.post(SLACK_WEBHOOK, json={
+                    "text": f"⚡ *자동 조치 실행됨*\n로그: `{line}`\n명령어: `{ai_cmd}`\n결과:\n```{result[:500]}```"
+                })
+            elif is_auto and not safe:
+                requests.post(SLACK_WEBHOOK, json={
+                    "text": f"⚠️ *자동 조치 차단됨 (보안 위험)*\n로그: `{line}`\n차단된 명령어: `{ai_cmd}`\n이유: `{word}` 키워드 포함"
+                })
+            else:
+                requests.post(SLACK_WEBHOOK, json={
+                    "text": "🚨 *장애 탐지 및 AI 조치 제안*",
+                    "attachments": [{
+                        "callback_id": "fix", "color": "#F44336",
+                        "fields": [
+                            {"title": "로그", "value": f"```{line}```"},
+                            {"title": "AI 제안" + (" (⚠️위험 포함)" if not safe else ""), "value": f"`{ai_cmd}`"}
+                        ],
+                        "actions": [
+                            {"name": "e", "text": "✅ 실행", "type": "button", "value": ai_cmd, "style": "primary"},
+                            {"name": "d", "text": "❌ 거절", "type": "button", "value": "ignore", "style": "danger"}
+                        ]
+                    }]
+                })
         except Exception as e: print(f"Monitor Error: {e}")
 
 if __name__ == "__main__":
@@ -158,18 +221,10 @@ echo "🎉 AI SRE 에이전트 설치가 완료되었습니다!"
 echo "===================================================="
 echo "📍 [에이전트 정보]"
 echo " - 설치 위치: $AGENT_DIR"
-echo " - 사용 모델: $GEMINI_MODEL"
-echo " - 서비스 포트: $SERVICE_PORT"
-echo " - 모니터링 방식: $MONITOR_TYPE ($LOG_PATH)"
+echo " - 자동 조치 키워드: $AGENT_DIR/auto_keywords.txt"
+echo " - 명령어 블랙리스트: $AGENT_DIR/blacklist.txt"
 echo ""
-echo "🔗 [슬랙 API 설정 URL]"
-echo " 1. Slash Command (/prompt_change):"
-echo "    http://$PUBLIC_IP:$SERVICE_PORT/prompt/slack"
-echo " 2. Interactivity & Shortcuts:"
-echo "    http://$PUBLIC_IP:$SERVICE_PORT/slack/interactive"
-echo ""
-echo "🔍 [관리 명령어]"
-echo " - 실시간 로그 확인: sudo journalctl -u ai-remediator.service -f"
-echo " - 서비스 재시작: sudo systemctl restart ai-remediator.service"
-echo " - 프롬프트 수동 수정: sudo nano $AGENT_DIR/prompt.txt"
+echo "🔍 [보안 가이드]"
+echo " - AI가 실행하면 안 되는 단어를 blacklist.txt에 추가하세요."
+echo " - 현재 rm, mkfs, shutdown, reboot 등이 차단되어 있습니다."
 echo "===================================================="
