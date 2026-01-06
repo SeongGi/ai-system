@@ -1,5 +1,5 @@
 #!/bin/bash
-# AI SRE Agent - Production Version (Log File vs Journald Selectable)
+# AI SRE Agent
 
 # 1. 설정 입력
 echo "=== AI SRE Agent Configuration ==="

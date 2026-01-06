@@ -1,5 +1,5 @@
 #!/bin/bash
-# AI SRE Agent - Security Enhanced Version (Blacklist File Supported)
+# AI SRE Agent
 
 # 1. 사용자 입력 받기
 echo "=== AI SRE 에이전트 설정 시작 ==="
