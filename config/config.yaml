@@ -1,0 +1,57 @@
+# AI-SRE-System Configuration File
+
+# API Settings
+api:
+  gemini_api_key: "${GEMINI_API_KEY}"
+  gemini_model: "gemini-1.5-flash"
+
+# Slack Settings
+slack:
+  webhook_url: "${SLACK_WEBHOOK_URL}"
+  channel: "#alerts"
+  username: "AI-SRE-Agent"
+
+# Monitoring Settings
+monitoring:
+  type: "JOURNAL"  # JOURNAL or FILE
+  log_path: "/var/log/syslog"  # Only used when type is FILE
+  error_levels:
+    - "err"
+    - "crit"
+    - "alert"
+    - "emerg"
+  error_keywords:  # Only used when type is FILE
+    - "ERROR"
+    - "CRITICAL"
+    - "FATAL"
+
+# Service Settings
+service:
+  port: 5000
+  host: "0.0.0.0"
+  debug: false
+
+# Security Settings
+security:
+  blacklist_file: "config/blacklist.txt"
+  auto_keywords_file: "config/auto_keywords.txt"
+  command_timeout: 15  # seconds
+  max_command_length: 500
+
+# Database Settings
+database:
+  path: "data/incidents.db"
+  retention_days: 30  # Keep incident history for 30 days
+
+# Dashboard Settings
+dashboard:
+  enabled: true
+  port: 5001
+  refresh_interval: 5  # seconds
+
+# Logging Settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/ai-sre-agent.log"
+  max_size_mb: 10
+  backup_count: 5
